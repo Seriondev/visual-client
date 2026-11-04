@@ -684,7 +684,7 @@ jobs:
                               src = this.pose.leftLeg;
                               break;
                       }
-                      this.root.copyTransform(src);
+                      this.root.setTransform(src.getTransform());
                   }
               }
 
