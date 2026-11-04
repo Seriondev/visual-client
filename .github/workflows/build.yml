@@ -1,0 +1,1120 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.14.3
+
+      - name: Generate project files
+        run: |
+          cat > settings.gradle <<'TS_EOF_0'
+          pluginManagement {
+              repositories {
+                  maven {
+                      name = 'Fabric'
+                      url = 'https://maven.fabricmc.net/'
+                  }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          rootProject.name = 'transparent-skin'
+          TS_EOF_0
+          cat > build.gradle <<'TS_EOF_1'
+          plugins {
+              id 'fabric-loom' version '1.11-SNAPSHOT'
+          }
+
+          version = '1.0.0'
+          group = 'com.vizkovico'
+
+          base {
+              archivesName = 'transparent-skin'
+          }
+
+          repositories {
+              mavenCentral()
+          }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:1.21.10"
+              mappings "net.fabricmc:yarn:1.21.10+build.3:v2"
+              modImplementation "net.fabricmc:fabric-loader:0.17.2"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:0.138.4+1.21.10"
+          }
+
+          processResources {
+              inputs.property "version", project.version
+
+              filesMatching("fabric.mod.json") {
+                  expand "version": project.version
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              it.options.release = 21
+          }
+
+          java {
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+          TS_EOF_1
+          mkdir -p src/main/resources
+          cat > src/main/resources/fabric.mod.json <<'TS_EOF_2'
+          {
+            "schemaVersion": 1,
+            "id": "transparentskin",
+            "version": "${version}",
+            "name": "Transparent Skin",
+            "description": "Skin transparan (opacity bisa diatur), hide bagian badan, dan cosmetic dari file Blockbench. Buka menu dengan /ts",
+            "authors": ["Anonymous"],
+            "license": "MIT",
+            "environment": "client",
+            "entrypoints": {
+              "client": ["com.vizkovico.transparentskin.TransparentSkinMod"]
+            },
+            "mixins": ["transparentskin.mixins.json"],
+            "depends": {
+              "fabricloader": ">=0.16.0",
+              "minecraft": "1.21.10",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          TS_EOF_2
+          mkdir -p src/main/resources
+          cat > src/main/resources/transparentskin.mixins.json <<'TS_EOF_3'
+          {
+            "required": true,
+            "minVersion": "0.8",
+            "package": "com.vizkovico.transparentskin.mixin",
+            "compatibilityLevel": "JAVA_21",
+            "mixins": [],
+            "client": [
+              "ModelPartMixin",
+              "PlayerEntityModelMixin"
+            ],
+            "injectors": {
+              "defaultRequire": 0
+            }
+          }
+          TS_EOF_3
+          mkdir -p src/main/java/com/vizkovico/transparentskin
+          cat > src/main/java/com/vizkovico/transparentskin/TransparentSkinMod.java <<'TS_EOF_4'
+          package com.vizkovico.transparentskin;
+
+          import com.google.gson.Gson;
+          import com.google.gson.GsonBuilder;
+          import com.google.gson.JsonArray;
+          import com.google.gson.JsonElement;
+          import com.google.gson.JsonObject;
+          import com.google.gson.JsonParser;
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+          import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.fabricmc.fabric.api.client.rendering.v1.LivingEntityFeatureRendererRegistrationCallback;
+          import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents;
+          import net.fabricmc.loader.api.FabricLoader;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.screen.GameMenuScreen;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.screen.ingame.InventoryScreen;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.client.gui.widget.SliderWidget;
+          import net.minecraft.client.model.Dilation;
+          import net.minecraft.client.model.ModelData;
+          import net.minecraft.client.model.ModelPart;
+          import net.minecraft.client.model.ModelPartBuilder;
+          import net.minecraft.client.model.ModelPartData;
+          import net.minecraft.client.model.ModelTransform;
+          import net.minecraft.client.model.TexturedModelData;
+          import net.minecraft.client.render.OverlayTexture;
+          import net.minecraft.client.render.RenderLayer;
+          import net.minecraft.client.render.command.OrderedRenderCommandQueue;
+          import net.minecraft.client.render.entity.PlayerEntityRenderer;
+          import net.minecraft.client.render.entity.feature.FeatureRenderer;
+          import net.minecraft.client.render.entity.feature.FeatureRendererContext;
+          import net.minecraft.client.render.entity.model.EntityModel;
+          import net.minecraft.client.render.entity.model.PlayerEntityModel;
+          import net.minecraft.client.render.entity.state.PlayerEntityRenderState;
+          import net.minecraft.client.texture.NativeImage;
+          import net.minecraft.client.texture.NativeImageBackedTexture;
+          import net.minecraft.client.util.math.MatrixStack;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.Identifier;
+
+          import java.io.ByteArrayInputStream;
+          import java.io.Reader;
+          import java.nio.charset.StandardCharsets;
+          import java.nio.file.Files;
+          import java.nio.file.Path;
+          import java.util.ArrayList;
+          import java.util.Base64;
+          import java.util.HashMap;
+          import java.util.List;
+          import java.util.Map;
+          import java.util.function.IntConsumer;
+          import java.util.stream.Stream;
+
+          public class TransparentSkinMod implements ClientModInitializer {
+
+              private static boolean openRequested = false;
+
+              @Override
+              public void onInitializeClient() {
+                  Config.load();
+
+                  ClientLifecycleEvents.CLIENT_STARTED.register(client -> Cosmetics.reload());
+
+                  ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
+                      String[] names = {"ts", "tskin"};
+                      for (String name : names) {
+                          dispatcher.register(
+                                  ClientCommandManager.literal(name)
+                                          .executes(ctx -> {
+                                              openRequested = true;
+                                              return 1;
+                                          })
+                                          .then(ClientCommandManager.literal("toggle").executes(ctx -> {
+                                              Config c = Config.get();
+                                              c.enabled = !c.enabled;
+                                              Config.save();
+                                              ctx.getSource().sendFeedback(Text.literal("Skin transparan: " + (c.enabled ? "ON" : "OFF")));
+                                              return 1;
+                                          }))
+                          );
+                      }
+                  });
+
+                  // GUI dibuka di tick berikutnya, supaya tidak langsung ketutup oleh chat screen
+                  ClientTickEvents.END_CLIENT_TICK.register(client -> {
+                      if (openRequested) {
+                          openRequested = false;
+                          client.setScreen(new ConfigScreen(null));
+                      }
+                  });
+
+                  // Daftarkan layer cosmetic ke renderer player
+                  LivingEntityFeatureRendererRegistrationCallback.EVENT.register((entityType, entityRenderer, registrationHelper, context) -> {
+                      try {
+                          if (entityRenderer instanceof PlayerEntityRenderer) {
+                              @SuppressWarnings("unchecked")
+                              FeatureRendererContext<PlayerEntityRenderState, PlayerEntityModel> ctx =
+                                      (FeatureRendererContext<PlayerEntityRenderState, PlayerEntityModel>) (Object) entityRenderer;
+                              registrationHelper.register(new CosmeticFeature(ctx));
+                          }
+                      } catch (Throwable t) {
+                          Cosmetics.error = String.valueOf(t);
+                      }
+                  });
+
+                  // Preview karakter di pause menu
+                  ScreenEvents.AFTER_INIT.register((client, screen, scaledWidth, scaledHeight) -> {
+                      if (screen instanceof GameMenuScreen) {
+                          ScreenEvents.afterRender(screen).register((s, drawContext, mouseX, mouseY, tickDelta) -> {
+                              try {
+                                  drawPreview(drawContext, s.width, s.height, mouseX, mouseY);
+                              } catch (Throwable t) {
+                                  Cosmetics.error = String.valueOf(t);
+                              }
+                          });
+                      }
+                  });
+              }
+
+              private static void drawPreview(DrawContext context, int sw, int sh, int mouseX, int mouseY) {
+                  MinecraftClient mc = MinecraftClient.getInstance();
+                  if (mc.player == null || sw < 330) {
+                      return;
+                  }
+                  int w = Math.min(90, sw / 5);
+                  int h = Math.min(150, sh - 60);
+                  if (h < 60) {
+                      return;
+                  }
+                  int x1 = 10;
+                  int y1 = (sh - h) / 2;
+                  InventoryScreen.drawEntity(context, x1, y1, x1 + w, y1 + h, (int) (h * 0.43f), 0.0625f, mouseX, mouseY, mc.player);
+              }
+
+              // ------------------------------------------------------------------
+              // Interface yang ditempel ke ModelPart lewat mixin (menyimpan "peran" part)
+              // role 1..6   = base layer: kepala, badan, tangan kanan, tangan kiri, kaki kanan, kaki kiri
+              // role 11..16 = outer layer: hat, jacket, lengan kanan, lengan kiri, celana kanan, celana kiri
+              // ------------------------------------------------------------------
+              public interface Part {
+                  int ts$getRole();
+
+                  void ts$setRole(int role);
+              }
+
+              // ------------------------------------------------------------------
+              // Config
+              // ------------------------------------------------------------------
+              public static final class Config {
+                  public boolean enabled = true;
+                  public boolean everyone = false;
+                  public int baseOpacity = 40;
+                  public int outerOpacity = 100;
+                  public boolean[] hideBase = new boolean[6];
+                  public boolean[] hideOuter = new boolean[6];
+                  public List<String> cosmetics = new ArrayList<>();
+                  public boolean cosmeticHideOriginal = true;
+
+                  private static Config instance = new Config();
+                  private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+
+                  public static Config get() {
+                      return instance;
+                  }
+
+                  private static Path file() {
+                      return FabricLoader.getInstance().getConfigDir().resolve("transparent-skin.json");
+                  }
+
+                  public static void load() {
+                      try {
+                          Path p = file();
+                          if (Files.exists(p)) {
+                              try (Reader r = Files.newBufferedReader(p, StandardCharsets.UTF_8)) {
+                                  Config c = GSON.fromJson(r, Config.class);
+                                  if (c != null) {
+                                      instance = c;
+                                  }
+                              }
+                          }
+                      } catch (Throwable t) {
+                          instance = new Config();
+                      }
+                      instance.sanitize();
+                  }
+
+                  public static void save() {
+                      try {
+                          Files.writeString(file(), GSON.toJson(instance), StandardCharsets.UTF_8);
+                      } catch (Throwable ignored) {
+                      }
+                  }
+
+                  private void sanitize() {
+                      baseOpacity = Math.max(0, Math.min(100, baseOpacity));
+                      outerOpacity = Math.max(0, Math.min(100, outerOpacity));
+                      if (hideBase == null || hideBase.length != 6) {
+                          hideBase = new boolean[6];
+                      }
+                      if (hideOuter == null || hideOuter.length != 6) {
+                          hideOuter = new boolean[6];
+                      }
+                      if (cosmetics == null) {
+                          cosmetics = new ArrayList<>();
+                      }
+                  }
+              }
+
+              // ------------------------------------------------------------------
+              // State (dipakai oleh mixin saat render)
+              // ------------------------------------------------------------------
+              public static final class State {
+                  /** true kalau model yang sedang dirender boleh dipengaruhi transparansi */
+                  public static boolean active = false;
+                  /** true kalau model yang sedang dirender adalah karakter kita sendiri */
+                  public static boolean selfNow = false;
+                  public static int angleHits = 0;
+                  public static int partHits = 0;
+
+                  private State() {
+                  }
+
+                  public static void tag(ModelPart part, int role) {
+                      if (part != null) {
+                          ((Part) (Object) part).ts$setRole(role);
+                      }
+                  }
+
+                  private static boolean firstPersonNoScreen() {
+                      MinecraftClient mc = MinecraftClient.getInstance();
+                      return mc != null && mc.currentScreen == null && mc.options != null
+                              && mc.options.getPerspective().isFirstPerson();
+                  }
+
+                  public static boolean effective() {
+                      Config c = Config.get();
+                      if (!c.enabled || !active) {
+                          return false;
+                      }
+                      if (!c.everyone && firstPersonNoScreen()) {
+                          return false;
+                      }
+                      return true;
+                  }
+
+                  public static boolean isHidden(int role) {
+                      if (partHits < 1000000) {
+                          partHits++;
+                      }
+                      if (selfNow && Cosmetics.hidesRole(role) && !firstPersonNoScreen()) {
+                          return true;
+                      }
+                      if (!effective()) {
+                          return false;
+                      }
+                      Config c = Config.get();
+                      if (role >= 1 && role <= 6) {
+                          return c.hideBase[role - 1];
+                      }
+                      if (role >= 11 && role <= 16) {
+                          return c.hideOuter[role - 11];
+                      }
+                      return false;
+                  }
+
+                  public static int tint(int role, int color) {
+                      if (!effective()) {
+                          return color;
+                      }
+                      Config c = Config.get();
+                      int pct = role < 10 ? c.baseOpacity : c.outerOpacity;
+                      if (pct >= 100) {
+                          return color;
+                      }
+                      int origAlpha = color >>> 24;
+                      if (origAlpha == 0) {
+                          return color;
+                      }
+                      int alpha = origAlpha * Math.max(0, pct) / 100;
+                      return (alpha << 24) | (color & 0x00FFFFFF);
+                  }
+              }
+
+              // ------------------------------------------------------------------
+              // Cosmetic: baca file .bbmodel (Blockbench) dari config/transparent-skin/cosmetics
+              // Nama file: <slot>_<nama>.bbmodel, slot = head, body, rightarm, leftarm, rightleg, leftleg
+              // ------------------------------------------------------------------
+              public static final class Cosmetics {
+                  public static final String[] SLOT_KEYS = {"head", "body", "rightarm", "leftarm", "rightleg", "leftleg"};
+                  public static final String[] SLOT_LABELS = {"Kepala", "Badan", "Tangan kanan", "Tangan kiri", "Kaki kanan", "Kaki kiri"};
+                  // pivot tiap slot di ruang Blockbench (y ke atas, kaki di y=0, depan = arah -Z)
+                  private static final double[][] PIVOTS = {
+                          {0, 24, 0}, {0, 24, 0}, {-5, 22, 0}, {5, 22, 0}, {-1.9, 12, 0}, {1.9, 12, 0}
+                  };
+
+                  public static final class Loaded {
+                      public final String display;
+                      public final String fileKey;
+                      public final int slot;
+                      public final Identifier texture;
+                      private final ModelData data;
+                      private final int texW;
+                      private final int texH;
+
+                      Loaded(String display, String fileKey, int slot, Identifier texture, ModelData data, int texW, int texH) {
+                          this.display = display;
+                          this.fileKey = fileKey;
+                          this.slot = slot;
+                          this.texture = texture;
+                          this.data = data;
+                          this.texW = texW;
+                          this.texH = texH;
+                      }
+
+                      public ModelPart buildRoot() {
+                          return TexturedModelData.of(data, texW, texH).createModel();
+                      }
+                  }
+
+                  public static final List<Loaded> ALL = new ArrayList<>();
+                  public static final List<Loaded> SELECTED = new ArrayList<>();
+                  private static final boolean[] HIDDEN = new boolean[20];
+                  public static String error = "";
+                  public static int version = 0;
+
+                  private Cosmetics() {
+                  }
+
+                  public static Path dir() {
+                      return FabricLoader.getInstance().getConfigDir().resolve("transparent-skin").resolve("cosmetics");
+                  }
+
+                  public static void reload() {
+                      ALL.clear();
+                      error = "";
+                      try {
+                          Files.createDirectories(dir());
+                      } catch (Throwable t) {
+                          error = String.valueOf(t);
+                      }
+                      try (Stream<Path> st = Files.list(dir())) {
+                          List<Path> files = new ArrayList<>();
+                          st.forEach(files::add);
+                          files.sort((a, b) -> a.getFileName().toString().compareToIgnoreCase(b.getFileName().toString()));
+                          for (Path p : files) {
+                              String fn = p.getFileName().toString();
+                              if (!fn.toLowerCase().endsWith(".bbmodel")) {
+                                  continue;
+                              }
+                              try {
+                                  ALL.add(parse(p, fn.substring(0, fn.length() - 8)));
+                              } catch (Throwable t) {
+                                  error = fn + ": " + t.getMessage();
+                              }
+                          }
+                      } catch (Throwable t) {
+                          error = String.valueOf(t);
+                      }
+                      version++;
+                      recompute();
+                  }
+
+                  private static double[] arr3(JsonObject o, String key) {
+                      JsonArray a = o.getAsJsonArray(key);
+                      return new double[]{a.get(0).getAsDouble(), a.get(1).getAsDouble(), a.get(2).getAsDouble()};
+                  }
+
+                  private static Loaded parse(Path path, String base) throws Exception {
+                      String lower = base.toLowerCase();
+                      int us = lower.indexOf('_');
+                      String prefix = us > 0 ? lower.substring(0, us) : lower;
+                      int slot = -1;
+                      for (int i = 0; i < SLOT_KEYS.length; i++) {
+                          if (SLOT_KEYS[i].equals(prefix)) {
+                              slot = i;
+                          }
+                      }
+                      if (slot < 0) {
+                          throw new IllegalArgumentException("nama file harus diawali head_, body_, rightarm_, leftarm_, rightleg_, atau leftleg_");
+                      }
+                      String display = us > 0 && us < base.length() - 1 ? base.substring(us + 1) : base;
+
+                      String json = Files.readString(path, StandardCharsets.UTF_8);
+                      JsonObject root = JsonParser.parseString(json).getAsJsonObject();
+
+                      int texW = 64;
+                      int texH = 64;
+                      if (root.has("resolution") && root.get("resolution").isJsonObject()) {
+                          JsonObject res = root.getAsJsonObject("resolution");
+                          texW = res.get("width").getAsInt();
+                          texH = res.get("height").getAsInt();
+                      }
+
+                      // texture pertama (disimpan di dalam file .bbmodel sebagai base64)
+                      JsonArray textures = root.has("textures") ? root.getAsJsonArray("textures") : null;
+                      if (textures == null || textures.size() == 0) {
+                          throw new IllegalStateException("tidak ada texture di model");
+                      }
+                      String src = textures.get(0).getAsJsonObject().get("source").getAsString();
+                      int comma = src.indexOf(',');
+                      if (!src.startsWith("data:") || comma < 0) {
+                          throw new IllegalStateException("texture harus tersimpan di dalam file (bukan path luar)");
+                      }
+                      byte[] bytes = Base64.getMimeDecoder().decode(src.substring(comma + 1));
+                      NativeImage img = NativeImage.read(new ByteArrayInputStream(bytes));
+
+                      String idPath = "cosmetic/" + lower.replaceAll("[^a-z0-9_.-]", "_");
+                      Identifier id = Identifier.of("transparentskin", idPath);
+                      final String texName = "transparentskin_" + lower;
+                      NativeImageBackedTexture tex = new NativeImageBackedTexture(() -> texName, img);
+                      MinecraftClient.getInstance().getTextureManager().registerTexture(id, tex);
+
+                      // cube -> ModelData (relatif terhadap pivot slot)
+                      double[] piv = PIVOTS[slot];
+                      ModelData md = new ModelData();
+                      ModelPartData rootData = md.getRoot();
+                      JsonArray els = root.getAsJsonArray("elements");
+                      int n = 0;
+                      if (els != null) {
+                          for (JsonElement e : els) {
+                              JsonObject o = e.getAsJsonObject();
+                              String type = o.has("type") ? o.get("type").getAsString() : "cube";
+                              if (!"cube".equals(type)) {
+                                  continue;
+                              }
+                              if (o.has("export") && !o.get("export").getAsBoolean()) {
+                                  continue;
+                              }
+                              double[] from = arr3(o, "from");
+                              double[] to = arr3(o, "to");
+                              double[] origin = o.has("origin") ? arr3(o, "origin") : from;
+                              double[] rot = o.has("rotation") ? arr3(o, "rotation") : new double[]{0, 0, 0};
+                              float inflate = o.has("inflate") ? o.get("inflate").getAsFloat() : 0f;
+                              boolean mirror = o.has("mirror_uv") && o.get("mirror_uv").getAsBoolean();
+
+                              int u = 0;
+                              int v = 0;
+                              boolean boxUv = o.has("box_uv") && o.get("box_uv").getAsBoolean();
+                              if (boxUv && o.has("uv_offset")) {
+                                  JsonArray uo = o.getAsJsonArray("uv_offset");
+                                  u = uo.get(0).getAsInt();
+                                  v = uo.get(1).getAsInt();
+                              } else if (o.has("faces") && o.getAsJsonObject("faces").has("north")) {
+                                  // UV per-face: perkirakan offset box dari sisi depan (north)
+                                  JsonArray uv = o.getAsJsonObject("faces").getAsJsonObject("north").getAsJsonArray("uv");
+                                  double d = Math.abs(to[2] - from[2]);
+                                  double fu = Math.min(uv.get(0).getAsDouble(), uv.get(2).getAsDouble());
+                                  double fv = Math.min(uv.get(1).getAsDouble(), uv.get(3).getAsDouble());
+                                  u = (int) Math.round(fu - d);
+                                  v = (int) Math.round(fv - d);
+                              }
+
+                              float px = (float) (origin[0] - piv[0]);
+                              float py = (float) (piv[1] - origin[1]);
+                              float pz = (float) (origin[2] - piv[2]);
+                              float cx = (float) (from[0] - origin[0]);
+                              float cy = (float) (origin[1] - to[1]);
+                              float cz = (float) (from[2] - origin[2]);
+                              float sx = (float) (to[0] - from[0]);
+                              float sy = (float) (to[1] - from[1]);
+                              float sz = (float) (to[2] - from[2]);
+
+                              rootData.addChild("c" + n,
+                                      ModelPartBuilder.create()
+                                              .uv(u, v)
+                                              .mirrored(mirror)
+                                              .cuboid(cx, cy, cz, sx, sy, sz, new Dilation(inflate)),
+                                      ModelTransform.of(px, py, pz,
+                                              (float) Math.toRadians(-rot[0]),
+                                              (float) Math.toRadians(rot[1]),
+                                              (float) Math.toRadians(-rot[2])));
+                              n++;
+                          }
+                      }
+                      if (n == 0) {
+                          throw new IllegalStateException("tidak ada cube di model");
+                      }
+                      return new Loaded(display, base, slot, id, md, texW, texH);
+                  }
+
+                  public static boolean isSelected(Loaded l) {
+                      return Config.get().cosmetics.contains(l.fileKey);
+                  }
+
+                  public static void toggle(Loaded l) {
+                      List<String> sel = Config.get().cosmetics;
+                      if (sel.contains(l.fileKey)) {
+                          sel.remove(l.fileKey);
+                      } else {
+                          // satu cosmetic per slot
+                          for (Loaded other : ALL) {
+                              if (other.slot == l.slot) {
+                                  sel.remove(other.fileKey);
+                              }
+                          }
+                          sel.add(l.fileKey);
+                      }
+                      Config.save();
+                      recompute();
+                  }
+
+                  public static void recompute() {
+                      SELECTED.clear();
+                      for (int i = 0; i < HIDDEN.length; i++) {
+                          HIDDEN[i] = false;
+                      }
+                      Config c = Config.get();
+                      for (Loaded l : ALL) {
+                          if (c.cosmetics.contains(l.fileKey)) {
+                              SELECTED.add(l);
+                              if (c.cosmeticHideOriginal) {
+                                  HIDDEN[l.slot + 1] = true;
+                                  HIDDEN[l.slot + 11] = true;
+                              }
+                          }
+                      }
+                  }
+
+                  public static boolean hidesRole(int role) {
+                      return role > 0 && role < HIDDEN.length && HIDDEN[role];
+                  }
+              }
+
+              // ------------------------------------------------------------------
+              // Model cosmetic: ikut pose bagian tubuh yang dipilih
+              // ------------------------------------------------------------------
+              public static final class CosmeticModel extends EntityModel<PlayerEntityRenderState> {
+                  private final PlayerEntityModel pose;
+                  private final int slot;
+
+                  public CosmeticModel(ModelPart root, PlayerEntityModel pose, int slot) {
+                      super(root);
+                      this.pose = pose;
+                      this.slot = slot;
+                  }
+
+                  @Override
+                  public void setAngles(PlayerEntityRenderState state) {
+                      super.setAngles(state);
+                      this.pose.setAngles(state);
+                      ModelPart src;
+                      switch (this.slot) {
+                          case 0:
+                              src = this.pose.head;
+                              break;
+                          case 1:
+                              src = this.pose.body;
+                              break;
+                          case 2:
+                              src = this.pose.rightArm;
+                              break;
+                          case 3:
+                              src = this.pose.leftArm;
+                              break;
+                          case 4:
+                              src = this.pose.rightLeg;
+                              break;
+                          default:
+                              src = this.pose.leftLeg;
+                              break;
+                      }
+                      this.root.copyTransform(src);
+                  }
+              }
+
+              public static final class CosmeticFeature extends FeatureRenderer<PlayerEntityRenderState, PlayerEntityModel> {
+                  private final Map<Cosmetics.Loaded, CosmeticModel> cache = new HashMap<>();
+                  private int cacheVersion = -1;
+
+                  public CosmeticFeature(FeatureRendererContext<PlayerEntityRenderState, PlayerEntityModel> context) {
+                      super(context);
+                  }
+
+                  @Override
+                  public void render(MatrixStack matrices, OrderedRenderCommandQueue queue, int light,
+                                     PlayerEntityRenderState state, float yaw, float pitch) {
+                      try {
+                          if (state.invisible || Cosmetics.SELECTED.isEmpty()) {
+                              return;
+                          }
+                          MinecraftClient mc = MinecraftClient.getInstance();
+                          if (mc.player == null || state.id != mc.player.getId()) {
+                              return;
+                          }
+                          if (cacheVersion != Cosmetics.version) {
+                              cache.clear();
+                              cacheVersion = Cosmetics.version;
+                          }
+                          for (Cosmetics.Loaded l : Cosmetics.SELECTED) {
+                              CosmeticModel m = cache.get(l);
+                              if (m == null) {
+                                  m = new CosmeticModel(l.buildRoot(), this.getContextModel(), l.slot);
+                                  cache.put(l, m);
+                              }
+                              queue.submitModel(m, state, matrices, RenderLayer.getEntityTranslucent(l.texture),
+                                      light, OverlayTexture.DEFAULT_UV, 0, null);
+                          }
+                      } catch (Throwable t) {
+                          Cosmetics.error = String.valueOf(t);
+                      }
+                  }
+              }
+
+              // ------------------------------------------------------------------
+              // GUI
+              // ------------------------------------------------------------------
+              public static final class ConfigScreen extends Screen {
+                  private static final String[] BASE_NAMES = {"Kepala", "Badan", "Tangan kanan", "Tangan kiri", "Kaki kanan", "Kaki kiri"};
+                  private static final String[] OUTER_NAMES = {"Hat", "Jacket", "Lengan kanan", "Lengan kiri", "Celana kanan", "Celana kiri"};
+
+                  private final Screen parent;
+                  private int page = 0; // 0 utama, 1 bagian tubuh, 2 cosmetic
+                  private int cosPage = 0;
+                  private int headerY = 20;
+                  private int leftCenterX = 0;
+                  private int rightCenterX = 0;
+
+                  public ConfigScreen(Screen parent) {
+                      super(Text.literal("Skin Transparan"));
+                      this.parent = parent;
+                  }
+
+                  @Override
+                  protected void init() {
+                      if (page == 0) {
+                          initMain();
+                      } else if (page == 1) {
+                          initParts();
+                      } else {
+                          initCosmetics();
+                      }
+                  }
+
+                  private void initMain() {
+                      Config c = Config.get();
+                      int w = Math.min(210, this.width - 20);
+                      int x = (this.width - w) / 2;
+                      int y = Math.max(28, (this.height - 170) / 2);
+
+                      this.addDrawableChild(ButtonWidget.builder(
+                              Text.literal("Skin transparan: " + (c.enabled ? "ON" : "OFF")),
+                              b -> {
+                                  c.enabled = !c.enabled;
+                                  b.setMessage(Text.literal("Skin transparan: " + (c.enabled ? "ON" : "OFF")));
+                              }).dimensions(x, y, w, 20).build());
+
+                      this.addDrawableChild(ButtonWidget.builder(
+                              Text.literal("Berlaku untuk: " + (c.everyone ? "Semua pemain" : "Diri sendiri")),
+                              b -> {
+                                  c.everyone = !c.everyone;
+                                  b.setMessage(Text.literal("Berlaku untuk: " + (c.everyone ? "Semua pemain" : "Diri sendiri")));
+                              }).dimensions(x, y + 24, w, 20).build());
+
+                      this.addDrawableChild(new OpacitySlider(x, y + 48, w, 20, "Opacity base layer", c.baseOpacity, v -> c.baseOpacity = v));
+                      this.addDrawableChild(new OpacitySlider(x, y + 72, w, 20, "Opacity outer layer", c.outerOpacity, v -> c.outerOpacity = v));
+
+                      int hw = (w - 4) / 2;
+                      this.addDrawableChild(ButtonWidget.builder(Text.literal("Bagian tubuh >"), b -> {
+                          page = 1;
+                          this.clearAndInit();
+                      }).dimensions(x, y + 96, hw, 20).build());
+                      this.addDrawableChild(ButtonWidget.builder(Text.literal("Cosmetic >"), b -> {
+                          page = 2;
+                          this.clearAndInit();
+                      }).dimensions(x + hw + 4, y + 96, hw, 20).build());
+
+                      this.addDrawableChild(ButtonWidget.builder(Text.literal("Selesai"), b -> this.close())
+                              .dimensions(x, y + 124, w, 20).build());
+                  }
+
+                  private void initParts() {
+                      Config c = Config.get();
+                      int gap = 10;
+                      int cw = Math.min(150, (this.width - 30) / 2);
+                      int lx = this.width / 2 - gap / 2 - cw;
+                      int rx = this.width / 2 + gap / 2;
+                      int y = Math.max(34, (this.height - 176) / 2 + 6);
+
+                      this.headerY = y - 12;
+                      this.leftCenterX = lx + cw / 2;
+                      this.rightCenterX = rx + cw / 2;
+
+                      for (int i = 0; i < 6; i++) {
+                          addPartButton(lx, y + i * 22, cw, BASE_NAMES[i], c.hideBase, i);
+                          addPartButton(rx, y + i * 22, cw, OUTER_NAMES[i], c.hideOuter, i);
+                      }
+
+                      int w = Math.min(210, this.width - 20);
+                      int x = (this.width - w) / 2;
+                      this.addDrawableChild(ButtonWidget.builder(Text.literal("< Kembali"), b -> {
+                          page = 0;
+                          this.clearAndInit();
+                      }).dimensions(x, y + 6 * 22 + 4, w, 20).build());
+                  }
+
+                  private void addPartButton(int x, int y, int w, String name, boolean[] hideArray, int index) {
+                      this.addDrawableChild(ButtonWidget.builder(
+                              Text.literal(partLabel(name, hideArray[index])),
+                              b -> {
+                                  hideArray[index] = !hideArray[index];
+                                  b.setMessage(Text.literal(partLabel(name, hideArray[index])));
+                              }).dimensions(x, y, w, 20).build());
+                  }
+
+                  private static String partLabel(String name, boolean hidden) {
+                      return name + ": " + (hidden ? "Hilang" : "Tampil");
+                  }
+
+                  private static String cosLabel(Cosmetics.Loaded l) {
+                      return l.display + " (" + Cosmetics.SLOT_LABELS[l.slot] + "): " + (Cosmetics.isSelected(l) ? "ON" : "OFF");
+                  }
+
+                  private void initCosmetics() {
+                      Config c = Config.get();
+                      int w = Math.min(210, this.width - 20);
+                      int x = (this.width - w) / 2;
+                      int y = Math.max(34, (this.height - 190) / 2 + 8);
+                      this.headerY = y;
+
+                      List<Cosmetics.Loaded> all = Cosmetics.ALL;
+                      int perPage = 5;
+                      int pages = Math.max(1, (all.size() + perPage - 1) / perPage);
+                      if (cosPage >= pages) {
+                          cosPage = pages - 1;
+                      }
+                      for (int i = 0; i < perPage; i++) {
+                          int idx = cosPage * perPage + i;
+                          if (idx >= all.size()) {
+                              break;
+                          }
+                          Cosmetics.Loaded l = all.get(idx);
+                          this.addDrawableChild(ButtonWidget.builder(Text.literal(cosLabel(l)), b -> {
+                              Cosmetics.toggle(l);
+                              b.setMessage(Text.literal(cosLabel(l)));
+                          }).dimensions(x, y + i * 22, w, 20).build());
+                      }
+
+                      int ny = y + perPage * 22;
+                      this.addDrawableChild(ButtonWidget.builder(Text.literal("<"), b -> {
+                          if (cosPage > 0) {
+                              cosPage--;
+                              this.clearAndInit();
+                          }
+                      }).dimensions(x, ny, 24, 20).build());
+                      this.addDrawableChild(ButtonWidget.builder(Text.literal("Muat ulang folder"), b -> {
+                          Cosmetics.reload();
+                          cosPage = 0;
+                          this.clearAndInit();
+                      }).dimensions(x + 28, ny, w - 56, 20).build());
+                      this.addDrawableChild(ButtonWidget.builder(Text.literal(">"), b -> {
+                          cosPage++;
+                          this.clearAndInit();
+                      }).dimensions(x + w - 24, ny, 24, 20).build());
+
+                      this.addDrawableChild(ButtonWidget.builder(
+                              Text.literal("Sembunyikan bagian asli: " + (c.cosmeticHideOriginal ? "ON" : "OFF")),
+                              b -> {
+                                  c.cosmeticHideOriginal = !c.cosmeticHideOriginal;
+                                  Cosmetics.recompute();
+                                  b.setMessage(Text.literal("Sembunyikan bagian asli: " + (c.cosmeticHideOriginal ? "ON" : "OFF")));
+                              }).dimensions(x, ny + 22, w, 20).build());
+
+                      this.addDrawableChild(ButtonWidget.builder(Text.literal("< Kembali"), b -> {
+                          page = 0;
+                          this.clearAndInit();
+                      }).dimensions(x, ny + 44, w, 20).build());
+                  }
+
+                  @Override
+                  public void renderBackground(DrawContext context, int mouseX, int mouseY, float delta) {
+                      // sengaja kosong: dunia tetap kelihatan jelas (tekan F5 untuk lihat karakter sendiri)
+                  }
+
+                  @Override
+                  public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+                      super.render(context, mouseX, mouseY, delta);
+                      context.drawCenteredTextWithShadow(this.textRenderer, this.title, this.width / 2, 10, 0xFFFFFFFF);
+
+                      if (page == 1) {
+                          context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Base layer"), leftCenterX, headerY, 0xFFFFFFFF);
+                          context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Outer layer"), rightCenterX, headerY, 0xFFFFFFFF);
+                      } else if (page == 2) {
+                          if (Cosmetics.ALL.isEmpty()) {
+                              context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Belum ada cosmetic. Taruh file .bbmodel di:"), this.width / 2, headerY + 8, 0xFFFFFFFF);
+                              context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("config/transparent-skin/cosmetics"), this.width / 2, headerY + 22, 0xFFFFFF55);
+                              context.drawCenteredTextWithShadow(this.textRenderer, Text.literal("Nama file: rightleg_korblox.bbmodel"), this.width / 2, headerY + 36, 0xFFAAAAAA);
+                          }
+                          String err = Cosmetics.error;
+                          if (!err.isEmpty()) {
+                              if (err.length() > 70) {
+                                  err = err.substring(0, 70);
+                              }
+                              context.drawCenteredTextWithShadow(this.textRenderer, Text.literal(err), this.width / 2, this.height - 12, 0xFFFF5555);
+                          }
+                      } else {
+                          String status = "Hook: model " + (State.angleHits > 0 ? "OK" : "-") + ", part " + (State.partHits > 0 ? "OK" : "-")
+                                  + " | cosmetic: " + Cosmetics.ALL.size();
+                          context.drawCenteredTextWithShadow(this.textRenderer, Text.literal(status), this.width / 2, this.height - 12, 0xFFAAAAAA);
+                      }
+                  }
+
+                  @Override
+                  public boolean shouldPause() {
+                      return false;
+                  }
+
+                  @Override
+                  public void close() {
+                      if (this.client != null) {
+                          this.client.setScreen(this.parent);
+                      }
+                  }
+
+                  @Override
+                  public void removed() {
+                      Config.save();
+                      super.removed();
+                  }
+              }
+
+              // ------------------------------------------------------------------
+              // Slider opacity (0 - 100 %)
+              // ------------------------------------------------------------------
+              private static final class OpacitySlider extends SliderWidget {
+                  private final String label;
+                  private final IntConsumer setter;
+
+                  OpacitySlider(int x, int y, int width, int height, String label, int percent, IntConsumer setter) {
+                      super(x, y, width, height, Text.empty(), percent / 100.0);
+                      this.label = label;
+                      this.setter = setter;
+                      this.updateMessage();
+                  }
+
+                  @Override
+                  protected void updateMessage() {
+                      String l = this.label == null ? "" : this.label;
+                      this.setMessage(Text.literal(l + ": " + (int) Math.round(this.value * 100.0) + "%"));
+                  }
+
+                  @Override
+                  protected void applyValue() {
+                      if (this.setter != null) {
+                          this.setter.accept((int) Math.round(this.value * 100.0));
+                      }
+                  }
+              }
+          }
+          TS_EOF_4
+          mkdir -p src/main/java/com/vizkovico/transparentskin/mixin
+          cat > src/main/java/com/vizkovico/transparentskin/mixin/ModelPartMixin.java <<'TS_EOF_5'
+          package com.vizkovico.transparentskin.mixin;
+
+          import com.vizkovico.transparentskin.TransparentSkinMod;
+          import net.minecraft.client.model.ModelPart;
+          import net.minecraft.client.render.VertexConsumer;
+          import net.minecraft.client.util.math.MatrixStack;
+          import org.spongepowered.asm.mixin.Mixin;
+          import org.spongepowered.asm.mixin.Shadow;
+          import org.spongepowered.asm.mixin.Unique;
+          import org.spongepowered.asm.mixin.injection.At;
+          import org.spongepowered.asm.mixin.injection.Inject;
+          import org.spongepowered.asm.mixin.injection.ModifyVariable;
+          import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+          @Mixin(ModelPart.class)
+          public abstract class ModelPartMixin implements TransparentSkinMod.Part {
+
+              @Shadow
+              public boolean hidden;
+
+              @Unique
+              private int ts$role = 0;
+
+              @Unique
+              private boolean ts$weHid = false;
+
+              @Override
+              public int ts$getRole() {
+                  return this.ts$role;
+              }
+
+              @Override
+              public void ts$setRole(int role) {
+                  this.ts$role = role;
+              }
+
+              @Inject(
+                      method = "render(Lnet/minecraft/client/util/math/MatrixStack;Lnet/minecraft/client/render/VertexConsumer;III)V",
+                      at = @At("HEAD"),
+                      require = 0
+              )
+              private void ts$beforeRender(MatrixStack matrices, VertexConsumer vertices, int light, int overlay, int color, CallbackInfo ci) {
+                  int role = this.ts$role;
+                  if (role == 0) {
+                      return;
+                  }
+                  try {
+                      boolean want = TransparentSkinMod.State.isHidden(role);
+                      if (want) {
+                          this.hidden = true;
+                          this.ts$weHid = true;
+                      } else if (this.ts$weHid) {
+                          this.hidden = false;
+                          this.ts$weHid = false;
+                      }
+                  } catch (Throwable ignored) {
+                  }
+              }
+
+              @ModifyVariable(
+                      method = "render(Lnet/minecraft/client/util/math/MatrixStack;Lnet/minecraft/client/render/VertexConsumer;III)V",
+                      at = @At("HEAD"),
+                      argsOnly = true,
+                      ordinal = 2,
+                      require = 0
+              )
+              private int ts$tint(int color) {
+                  int role = this.ts$role;
+                  if (role == 0) {
+                      return color;
+                  }
+                  try {
+                      return TransparentSkinMod.State.tint(role, color);
+                  } catch (Throwable t) {
+                      return color;
+                  }
+              }
+          }
+          TS_EOF_5
+          mkdir -p src/main/java/com/vizkovico/transparentskin/mixin
+          cat > src/main/java/com/vizkovico/transparentskin/mixin/PlayerEntityModelMixin.java <<'TS_EOF_6'
+          package com.vizkovico.transparentskin.mixin;
+
+          import com.vizkovico.transparentskin.TransparentSkinMod;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.render.entity.model.PlayerEntityModel;
+          import net.minecraft.client.render.entity.state.PlayerEntityRenderState;
+          import org.spongepowered.asm.mixin.Mixin;
+          import org.spongepowered.asm.mixin.injection.At;
+          import org.spongepowered.asm.mixin.injection.Inject;
+          import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+          @Mixin(PlayerEntityModel.class)
+          public abstract class PlayerEntityModelMixin {
+
+              @Inject(
+                      method = "setAngles(Lnet/minecraft/client/render/entity/state/PlayerEntityRenderState;)V",
+                      at = @At("TAIL"),
+                      require = 0
+              )
+              private void ts$afterSetAngles(PlayerEntityRenderState state, CallbackInfo ci) {
+                  try {
+                      PlayerEntityModel m = (PlayerEntityModel) (Object) this;
+
+                      // base layer
+                      TransparentSkinMod.State.tag(m.head, 1);
+                      TransparentSkinMod.State.tag(m.body, 2);
+                      TransparentSkinMod.State.tag(m.rightArm, 3);
+                      TransparentSkinMod.State.tag(m.leftArm, 4);
+                      TransparentSkinMod.State.tag(m.rightLeg, 5);
+                      TransparentSkinMod.State.tag(m.leftLeg, 6);
+
+                      // outer layer
+                      TransparentSkinMod.State.tag(m.hat, 11);
+                      TransparentSkinMod.State.tag(m.jacket, 12);
+                      TransparentSkinMod.State.tag(m.rightSleeve, 13);
+                      TransparentSkinMod.State.tag(m.leftSleeve, 14);
+                      TransparentSkinMod.State.tag(m.rightPants, 15);
+                      TransparentSkinMod.State.tag(m.leftPants, 16);
+
+                      MinecraftClient mc = MinecraftClient.getInstance();
+                      boolean self = mc != null && mc.player != null && state.id == mc.player.getId();
+
+                      TransparentSkinMod.Config c = TransparentSkinMod.Config.get();
+                      TransparentSkinMod.State.active = c.enabled && (c.everyone || self);
+                      TransparentSkinMod.State.selfNow = self;
+
+                      if (TransparentSkinMod.State.angleHits < 1000000) {
+                          TransparentSkinMod.State.angleHits++;
+                      }
+                  } catch (Throwable t) {
+                      TransparentSkinMod.State.active = false;
+                  }
+              }
+          }
+          TS_EOF_6
+
+      - name: Build
+        run: gradle build --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: transparent-skin
+          path: build/libs/*.jar
